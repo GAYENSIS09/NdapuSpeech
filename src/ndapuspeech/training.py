@@ -83,7 +83,13 @@ class TrainingConfig:
                 values[key] = str(values[key])
         if overrides:
             values.update(overrides)
-        return cls(**values)
+        cfg = cls(**values)
+        if cfg.save_steps % cfg.eval_steps != 0:
+            raise ValueError(
+                f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps ({cfg.eval_steps}) "
+                f"when load_best_model_at_end=True"
+            )
+        return cfg
 
 
 def _load_training_libs() -> tuple[Any, ...]:
@@ -249,6 +255,12 @@ def train_model(cfg: TrainingConfig) -> Path:
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if cfg.save_steps % cfg.eval_steps != 0:
+        raise ValueError(
+            f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps ({cfg.eval_steps}) "
+            f"when load_best_model_at_end=True"
+        )
 
     optim_args = {
         "num_train_epochs": cfg.num_epochs,
