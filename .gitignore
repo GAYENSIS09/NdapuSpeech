@@ -60,3 +60,7 @@ logs/
 tests/
 AGENTS.md
 opencode.json
+
+# opencode / omo
+.opencode/
+.omo/
