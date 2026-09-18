@@ -82,7 +82,7 @@ Edit YAMLs; no code changes needed.
   title={NdapuSpeech: Open ASR for Wolof},
   author={...},
   year={2024},
-  url={https://github.com/...}
+  url={https://github.com/GAYENSIS09/ndapuspeech}
 }
 ```
 
