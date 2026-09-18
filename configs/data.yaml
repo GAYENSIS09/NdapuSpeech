@@ -1,0 +1,45 @@
+openslr_mirrors:
+  - https://www.openslr.org/resources
+  - https://mirror.indra.market/openslr/resources
+  - https://openslr.elda.org/resources
+hf_dataset_repo: ndapuspeech/ndapuspeech-dataset
+hf_model_repo: ndapuspeech/ndapuspeech-asr
+include_sources:
+  - kallaama
+  - alffa
+  - fleurs
+  - wolbanking77
+datasets:
+  kallaama:
+    resource_id: 151
+    filename: speech_dataset_wol.tar.gz
+    fallback_url: https://zenodo.org/records/10892569/files/speech_dataset_wol.tar.gz
+    large: true
+  alffa:
+    resource_id: 25
+    filename: data_readspeech_wo.tar.bz2
+    large: true
+  fleurs:
+    hub_id: google/fleurs
+    subset: wo_sn
+  wolbanking77:
+    hub_id: karim155/WolBanking77
+manifests:
+  - data/processed/manifest.jsonl
+kenlm:
+  corpora_paths:
+    - data/raw/kallaama/clean_dataset_ready4release/wolof/text_corpora/wolof.txt
+    - data/raw/wikipedia_wo.txt
+    - data/raw/wolbanking77
+    - data/text/wolof
+  output_arpa: models/kenlm/wolof_4gram.arpa
+  output_bin: models/kenlm/wolof_4gram.bin
+  order: 4
+tokenizer:
+  vocab_size: 10000
+  extended_tokenizer_dir: models/whisper-tokenizer-extended
+  corpora_paths:
+    - data/raw/kallaama/clean_dataset_ready4release/wolof/text_corpora/wolof.txt
+    - data/raw/wikipedia_wo.txt
+    - data/raw/wolbanking77
+    - data/text/wolof

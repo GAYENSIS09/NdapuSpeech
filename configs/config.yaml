@@ -1,0 +1,37 @@
+paths:
+  data_dir: data
+  raw_data_dir: data/raw
+  processed_data_dir: data/processed
+  datasets_dir: data/datasets
+  models_dir: models
+  logs_dir: logs
+
+audio:
+  target_sample_rate: 16000
+  target_channels: 1
+  vad_threshold: 0.5
+  vad_min_speech_ms: 300
+  vad_min_silence_ms: 100
+  max_segment_seconds: 30
+  min_segment_seconds: 3
+
+model:
+  base_model: openai/whisper-large-v3-turbo
+  pretrain_model: openai/whisper-large-v3
+  language: wo
+  language_tokens:
+    - "<|wo|>"
+    - "<|wo-fam|>"
+    - "<|wo-formal|>"
+  special_chars:
+    - ñ
+    - ë
+    - ŋ
+    - ɗ
+    - ɓ
+    - ƴ
+    - ó
+    - é
+    - à
+    - â
+    - ê
