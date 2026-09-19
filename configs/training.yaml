@@ -11,11 +11,11 @@ train_split: 0.85
 seed: 42
 eval_steps: 200
 save_steps: 400
-use_lora: false
+use_lora: true
 resume_from: null
 max_steps: null
 noise_dir: null
 push_to_hub: null
-fp16: false
+fp16: true
 bf16: false
 hub_dataset: ndapuspeech/ndapuspeech-dataset

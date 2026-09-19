@@ -59,6 +59,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=self.padding,
             return_tensors="pt",
         )["input_ids"]
+        max_len = self.processor.tokenizer.model_max_length
+        if labels.shape[1] > max_len:
+            labels = labels[:, :max_len]
         labels = labels.masked_fill(labels == self.processor.tokenizer.pad_token_id, -100)
         if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all():
             labels = labels[:, 1:]

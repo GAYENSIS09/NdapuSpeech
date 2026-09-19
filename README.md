@@ -1,22 +1,25 @@
 # NdapuSpeech
 
-**Open ASR for the Wolof language** — building a high-quality, open-source Automatic Speech Recognition model for Wolof, the most widely spoken language in Senegal. Named after Ndapu, my mother.
+**Open ASR for the Wolof language**
+
+building a high-quality, open-source Automatic Speech Recognition model for Wolof, the most widely spoken language in Senegal. Named after Ndapu, my mother.
 
 ## Overview
 
 NdapuSpeech aims to create a production-grade ASR model for Wolof by:
+
 - Aggregating and cleaning all available public Wolof speech datasets
-- Training on Whisper Large-v3 Turbo with LoRA fine-tuning
+- Training on Whisper Large-v3 Turbo with LoRA fine-tuning with 152 hours off fine tuning on 16G RTX 5060
 - Evaluating rigorously against baselines (M-Kiriku, Whisper zero-shot)
 
 ## Datasets Used
 
-| Dataset | Domain | Hours | Source |
-|---------|--------|-------|--------|
-| **Kallaama** | Agriculture/Radio | ~55h | OpenSLR 151 |
-| **ALFFA** | Read speech | ~18h | OpenSLR 25 |
-| **FLEURS (wo)** | Multi-domain | ~10h | Google/HF |
-| **WolBanking77** | Banking | ~4h | AI4D/HF |
+| Dataset                | Domain            | Hours | Source      |
+| ---------------------- | ----------------- | ----- | ----------- |
+| **Kallaama**     | Agriculture/Radio | ~55h  | OpenSLR 151 |
+| **ALFFA**        | Read speech       | ~18h  | OpenSLR 25  |
+| **FLEURS (wo)**  | Multi-domain      | ~10h  | Google/HF   |
+| **WolBanking77** | Banking           | ~4h   | AI4D/HF     |
 
 **Total: ~87+ hours** of diverse Wolof speech.
 
@@ -36,37 +39,13 @@ python -c "from ndapuspeech.data import build_unified_dataset; build_unified_dat
 python -m ndapuspeech.training
 ```
 
-## Project Structure
 
-```
-configs/           # YAML configuration (config, training, data)
-notebooks/         # Example pipelines (run_all, download, train, etc.)
-src/ndapuspeech/   # Main package
-  ├── config.py    # Central config loader
-  ├── data.py      # Download + unified dataset builder
-  ├── audio.py     # VAD, segmentation, preprocessing
-  ├── models.py    # Whisper + tokenizer
-  ├── training.py  # Training loop (HF Trainer)
-  ├── evaluation.py # WER/CER metrics
-  ├── text.py      # Wolof text normalization
-  └── kenlm.py     # Language model helpers
-tests/             # Unit tests (pytest)
-```
-
-## Configuration
-
-All tunable parameters live in `configs/*.yaml`:
-- `config.yaml` — paths, audio, model
-- `training.yaml` — hyperparams, LoRA, scheduler
-- `data.yaml` — dataset sources, manifests, tokenizer
-
-Edit YAMLs; no code changes needed.
 
 ## Results (Target)
 
-| Model | WER (dev) | WER (test) | Notes |
-|-------|-----------|------------|-------|
-| Whisper Large-v3 (zero-shot) | ~35% | ~38% | Baseline |
+| Model                             | WER (dev)      | WER (test)     | Notes      |
+| --------------------------------- | -------------- | -------------- | ---------- |
+| Whisper Large-v3 (zero-shot)      | ~35%           | ~38%           | Baseline   |
 | **NdapuSpeech (this work)** | **<15%** | **<18%** | Fine-tuned |
 
 ## Requirements
@@ -80,7 +59,7 @@ Edit YAMLs; no code changes needed.
 ```bibtex
 @misc{ndapuspeech,
   title={NdapuSpeech: Open ASR for Wolof},
-  author={...},
+  author={Baye Mor Gaye},
   year={2024},
   url={https://github.com/GAYENSIS09/ndapuspeech}
 }

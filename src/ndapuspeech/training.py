@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import config
 from .evaluation import compute_cer, compute_wer
@@ -104,11 +104,60 @@ def _load_training_libs() -> tuple[Any, ...]:
             WhisperProcessor,
         )
 
+        class _AutocastSeq2SeqTrainer(Seq2SeqTrainer):
+            """Seq2SeqTrainer that wraps generate() in autocast to fix fp16 dtype mismatches."""
+
+            def prediction_step(
+                self, model, inputs, prediction_loss_only=None, ignore_keys=None, **gen_kwargs
+            ):
+                import contextlib
+
+                if not getattr(self.args, "predict_with_generate", False) or prediction_loss_only:
+                    return super().prediction_step(
+                        model,
+                        inputs,
+                        prediction_loss_only=prediction_loss_only,
+                        ignore_keys=ignore_keys,
+                        **gen_kwargs,
+                    )
+
+                if not hasattr(gen_kwargs, "max_new_tokens") and "max_new_tokens" not in gen_kwargs:
+                    gen_kwargs.setdefault("max_new_tokens", 225)
+
+                device = self.args.device
+                dtype = (
+                    torch.float16
+                    if self.args.fp16
+                    else (torch.bfloat16 if self.args.bf16 else torch.float32)
+                )
+                autocast_ctx = (
+                    torch.amp.autocast(device_type=device.type, dtype=dtype)
+                    if dtype != torch.float32
+                    else contextlib.nullcontext()
+                )
+                with autocast_ctx, torch.no_grad():
+                    # The Trainer stubs type ``model`` as optional; at this
+                    # point prediction_step can only run with a model set.
+                    model = cast(Any, self.model)
+                    generated_tokens = model.generate(
+                        inputs["input_features"],
+                        attention_mask=inputs.get("attention_mask"),
+                        **gen_kwargs,
+                    )
+
+                labels = inputs.get("labels")
+                if labels is not None:
+                    labels = labels.to(generated_tokens.device)
+
+                loss = None
+
+                return loss, generated_tokens, labels
+
         return (
             torch,
             load_dataset,
             WhisperProcessor,
-            Seq2SeqTrainer,
+            _AutocastSeq2SeqTrainer,
             Seq2SeqTrainingArguments,
             EarlyStoppingCallback,
         )
@@ -221,6 +270,7 @@ def train_model(cfg: TrainingConfig) -> Path:
         lr_encoder=cfg.lr_encoder,
         tokenizer_path=cfg.tokenizer_dir,
     )
+    processor.tokenizer.model_max_length = model.config.max_target_positions
 
     ds = _load_datasets(cfg)
     train_ds = ds["train"]
@@ -276,7 +326,6 @@ def train_model(cfg: TrainingConfig) -> Path:
         "metric_for_best_model": "wer",
         "greater_is_better": False,
         "predict_with_generate": True,
-        "generation_max_length": 225,
         "fp16": cfg.fp16 or (not cfg.bf16 and device == "cuda"),
         "bf16": cfg.bf16,
         "logging_steps": 25,
