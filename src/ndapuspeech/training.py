@@ -269,6 +269,7 @@ def train_model(cfg: TrainingConfig) -> Path:
         "report_to": "none",
         "seed": cfg.seed,
         "dataloader_num_workers": 0,
+        "remove_unused_columns": False,
         "gradient_checkpointing": True,
         "optim": "adamw_torch",
         "max_grad_norm": 1.0,
