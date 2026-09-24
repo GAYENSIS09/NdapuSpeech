@@ -86,8 +86,8 @@ class TrainingConfig:
         cfg = cls(**values)
         if cfg.save_steps % cfg.eval_steps != 0:
             raise ValueError(
-                f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps ({cfg.eval_steps}) "
-                f"when load_best_model_at_end=True"
+                f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps "
+                f"({cfg.eval_steps}) when load_best_model_at_end=True"
             )
         return cfg
 
@@ -165,51 +165,6 @@ def _load_training_libs() -> tuple[Any, ...]:
         raise RuntimeError("Missing dependencies: pip install -r requirements.txt") from e
 
 
-def prepare_dataset(batch: dict, processor: Any) -> dict:
-    """Compute input features and label ids for a dataset row (supports batched)."""
-    import soundfile as sf
-    import numpy as np
-
-    audio = batch["audio"]
-    transcripts = batch["transcript"]
-
-    # Handle batched input
-    if isinstance(audio, list):
-        audio_arrays = []
-        for a in audio:
-            if isinstance(a, dict):
-                audio_arrays.append(a.get("array"))
-            elif isinstance(a, str):
-                arr, _ = sf.read(a)
-                audio_arrays.append(arr)
-            else:
-                audio_arrays.append(a)
-    else:
-        # Single example
-        if isinstance(audio, dict):
-            audio_arrays = [audio.get("array")]
-        elif isinstance(audio, str):
-            arr, _ = sf.read(audio)
-            audio_arrays = [arr]
-        else:
-            audio_arrays = [audio]
-        transcripts = [transcripts]
-
-    # Extract features in batch
-    input_features = processor.feature_extractor(
-        audio_arrays, sampling_rate=config.TARGET_SAMPLE_RATE, return_tensors="pt"
-    ).input_features
-
-    labels = processor.tokenizer(
-        transcripts,
-        return_tensors="pt",
-        add_special_tokens=False,
-        padding=True,
-    ).input_ids
-
-    return {"input_features": input_features, "labels": labels}
-
-
 def compute_metrics_fn(processor: Any) -> Callable[[Any], dict]:
     """Return a trainer metrics callback decoding predictions to WER/CER."""
 
@@ -217,6 +172,7 @@ def compute_metrics_fn(processor: Any) -> Callable[[Any], dict]:
         pred_ids = pred.predictions
         label_ids = pred.label_ids
         label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+        pred_ids[pred_ids == -100] = processor.tokenizer.pad_token_id
         pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
         return {
@@ -273,32 +229,12 @@ def train_model(cfg: TrainingConfig) -> Path:
     processor.tokenizer.model_max_length = model.config.max_target_positions
 
     ds = _load_datasets(cfg)
-    train_ds = ds["train"]
-    val_ds = ds.get("val", ds["test"])
+    train_ds = ds["train"].select_columns(["audio", "transcript"])
+    val_ds = (ds["val"] if "val" in ds else ds["test"]).select_columns(["audio", "transcript"])
     test_ds = ds.get("test", None)
 
-    train_ds = train_ds.map(
-        prepare_dataset,
-        fn_kwargs={"processor": processor},
-        remove_columns=train_ds.column_names,
-        num_proc=1,
-        writer_batch_size=100,
-        batched=True,
-        batch_size=16,
-        load_from_cache_file=True,
-        desc="Preparing train dataset",
-    )
-    val_ds = val_ds.map(
-        prepare_dataset,
-        fn_kwargs={"processor": processor},
-        remove_columns=val_ds.column_names,
-        num_proc=1,
-        writer_batch_size=100,
-        batched=True,
-        batch_size=16,
-        load_from_cache_file=True,
-        desc="Preparing val dataset",
-    )
+    del ds
+
     if cfg.noise_dir:
         train_ds = NoisyDataset(train_ds, processor, noise_dir=cfg.noise_dir, aug_prob=0.5)
 
@@ -308,8 +244,8 @@ def train_model(cfg: TrainingConfig) -> Path:
 
     if cfg.save_steps % cfg.eval_steps != 0:
         raise ValueError(
-            f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps ({cfg.eval_steps}) "
-            f"when load_best_model_at_end=True"
+            f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps "
+            f"({cfg.eval_steps}) when load_best_model_at_end=True"
         )
 
     optim_args = {
@@ -332,7 +268,7 @@ def train_model(cfg: TrainingConfig) -> Path:
         "output_dir": str(out_dir),
         "report_to": "none",
         "seed": cfg.seed,
-        "dataloader_num_workers": 2,
+        "dataloader_num_workers": 0,
         "gradient_checkpointing": True,
         "optim": "adamw_torch",
         "max_grad_norm": 1.0,
@@ -362,11 +298,6 @@ def train_model(cfg: TrainingConfig) -> Path:
     processor.save_pretrained(str(out_dir))
 
     if test_ds is not None:
-        test_ds = test_ds.map(
-            lambda batch: prepare_dataset(batch, processor),
-            remove_columns=test_ds.column_names,
-            num_proc=2,
-        )
         logger.info("Test: %s", trainer.evaluate(test_ds, metric_key_prefix="test"))
 
     if cfg.push_to_hub:

@@ -38,7 +38,8 @@ def transcribe_with_lm(model_path: str, audio_path: str, lm_path: str) -> dict:
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
     processor = WhisperProcessor.from_pretrained(model_path)
-    model = WhisperForConditionalGeneration.from_pretrained(model_path)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = WhisperForConditionalGeneration.from_pretrained(model_path).to(device)
 
     import kenlm
 
@@ -47,7 +48,7 @@ def transcribe_with_lm(model_path: str, audio_path: str, lm_path: str) -> dict:
     audio, sr = librosa.load(audio_path, sr=config.TARGET_SAMPLE_RATE)
     input_features = processor.feature_extractor(
         audio, sampling_rate=sr, return_tensors="pt"
-    ).input_features
+    ).to(device)
 
     with torch.no_grad():
         outputs = model.generate(
@@ -60,7 +61,11 @@ def transcribe_with_lm(model_path: str, audio_path: str, lm_path: str) -> dict:
             num_return_sequences=3,
         )
 
-    candidates = [processor.decode(seq, skip_special_tokens=True) for seq in outputs.sequences]
+    candidates = [
+        processor.decode(seq.cpu(), skip_special_tokens=True) for seq in outputs.sequences
+    ]
+    if not candidates:
+        return {"text": "", "lm_score": None, "candidates": []}
     scored = sorted(
         ((cand, lm.score(cand, bos=True, eos=True)) for cand in candidates),
         key=lambda item: -item[1],
@@ -77,6 +82,8 @@ def transcribe_batch(model_path: str, samples: list[dict], batch_size: int = 16)
         batch = samples[i : i + batch_size]
         audios = [b["audio"] for b in batch]
         outputs = pipe(audios, batch_size=batch_size, return_timestamps=False)
+        if not isinstance(outputs, list):
+            outputs = [outputs]
         for sample, output in zip(batch, outputs, strict=True):
             copy = dict(sample)
             copy["prediction"] = output["text"].strip()

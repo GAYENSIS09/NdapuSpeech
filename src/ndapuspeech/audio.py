@@ -45,6 +45,7 @@ class AudioSegmenter:
             self._vad_model, _ = torch.hub.load(
                 repo_or_dir="snakers4/silero-vad",
                 model="silero_vad",
+                trust_repo=True,
                 force_reload=False,
             )
             self._vad_model.eval()
@@ -147,7 +148,7 @@ class AudioSegmenter:
         """Load, VAD-segment, split, and save segments with metadata."""
         import soundfile as sf
 
-        audio, sr = self.load_audio(audio_path, self.target_sr)
+        audio, sr = self.load_audio(audio_path, target_sr=None)
         audio = self.normalize(audio)
         audio = self.resample(audio, sr)
 

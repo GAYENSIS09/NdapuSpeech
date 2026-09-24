@@ -11,7 +11,6 @@ from . import config
 from .config import (
     LEARNING_RATE_DECODER,
     LEARNING_RATE_ENCODER,
-    PROCESSED_DATA_DIR,
 )
 from .text import collect_text_corpora
 
@@ -41,21 +40,59 @@ def set_seed(seed: int = config.SEED) -> None:
 
 
 class DataCollatorSpeechSeq2SeqWithPadding:
-    """Collator padding Whisper input features and labels into a batch."""
+    """Build a Whisper batch without materializing features in RAM.
+
+    Accepts raw rows (``audio`` path + ``transcript``) and extracts Mel features
+    lazily per batch, or precomputed rows (``input_features`` + tokenized labels),
+    e.g. produced by NoisyDataset.
+    """
 
     def __init__(self, processor: Any, padding: str = "longest"):
         self.processor = processor
         self.padding = padding
 
+    @staticmethod
+    def _mel(processor: Any, audio: np.ndarray) -> np.ndarray:
+        """Extract the 2D Mel feature array for one clip."""
+        return processor.feature_extractor(
+            audio,
+            sampling_rate=config.TARGET_SAMPLE_RATE,
+            return_tensors="pt",
+        ).input_features[0]
+
+    def _raw_features(self, features: list[dict]) -> list[dict]:
+        """Load each raw audio clip and extract its Mel features."""
+        import librosa
+
+        batches: list[dict] = []
+        for f in features:
+            audio = f["audio"]
+            if isinstance(audio, dict):
+                array = audio["array"]
+            else:
+                array, _ = librosa.load(audio, sr=config.TARGET_SAMPLE_RATE)
+            batches.append({"input_features": self._mel(self.processor, array)})
+        return batches
+
     def __call__(self, features: list[dict]) -> dict:
-        input_features = [{"input_features": f["input_features"]} for f in features]
+        precomputed = "input_features" in features[0]
+        if precomputed:
+            raw_batch = [{"input_features": f["input_features"]} for f in features]
+            label_ids = [f["labels"] for f in features]
+        else:
+            raw_batch = self._raw_features(features)
+            label_ids = [
+                self.processor.tokenizer(f["transcript"], add_special_tokens=False).input_ids
+                for f in features
+            ]
+
         batch = self.processor.feature_extractor.pad(
-            input_features,
+            raw_batch,
             padding=self.padding,
             return_tensors="pt",
         )
         labels = self.processor.tokenizer.pad(
-            {"input_ids": [f["labels"] for f in features]},
+            {"input_ids": label_ids},
             padding=self.padding,
             return_tensors="pt",
         )["input_ids"]
@@ -134,8 +171,9 @@ def train_bpe(corpus: str, vocab_size: int = config.DATA["tokenizer"]["vocab_siz
     Returns a dict with the actual `É`, `É`, `Ë` and `<pad>` ids read
     from the trained model (never hardcoded), plus the remaining pieces.
     """
-    import sentencepiece as spm
     import tempfile
+
+    import sentencepiece as spm
 
     # Use temp directory to avoid Windows path issues
     with tempfile.TemporaryDirectory() as tmp_dir:

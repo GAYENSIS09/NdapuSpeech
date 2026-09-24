@@ -1,47 +1,52 @@
-# NdapuSpeech
+<div align="center">
+  <img src="ndapu.svg" alt="Ndapu logo" width="200" />
+  <h1>NdapuSpeech</h1>
+</div>
 
-**Open ASR for the Wolof language**
 
-building a high-quality, open-source Automatic Speech Recognition model for Wolof, the most widely spoken language in Senegal. Named after Ndapu, my mother.
+
+*An open-source ASR model for the Wolof language.*
+
+<!-- ![Ndapu logo](assets/logo.png) -->
+
+NdapuSpeech is an open Automatic Speech Recognition (ASR) model for **Wolof**, the most widely spoken language in Senegal. The project is named after **Ndapu**, my mother.
 
 ## Overview
 
-NdapuSpeech aims to create a production-grade ASR model for Wolof by:
+NdapuSpeech aims to build a production-grade ASR model for Wolof by:
 
 - Aggregating and cleaning all available public Wolof speech datasets
-- Training on Whisper Large-v3 Turbo with LoRA fine-tuning with 152 hours off fine tuning on 16G RTX 5060
+- Fine-tuning **Whisper Large-v3 Turbo** with **LoRA**
 - Evaluating rigorously against baselines (M-Kiriku, Whisper zero-shot)
+
+**Training setup:** 152 hours of fine-tuning on a single NVIDIA RTX 5060 (16GB VRAM).
+
+## Demo
+
+<!-- [Watch the demo video](INSERT_LINK) -->
+
+*Demo video coming soon.*
+
+## Resources
+
+| Resource      | Link                                                                          |
+| ------------- | ----------------------------------------------------------------------------- |
+| Model weights | [ndapuspeech-asr-v1](INSERT_HUGGINGFACE_LINK) on Hugging Face                  |
+| Code          | [github.com/GAYENSIS09/ndapuspeech](https://github.com/GAYENSIS09/ndapuspeech) |
 
 ## Datasets Used
 
-| Dataset                | Domain            | Hours | Source      |
-| ---------------------- | ----------------- | ----- | ----------- |
-| **Kallaama**     | Agriculture/Radio | ~55h  | OpenSLR 151 |
-| **ALFFA**        | Read speech       | ~18h  | OpenSLR 25  |
-| **FLEURS (wo)**  | Multi-domain      | ~10h  | Google/HF   |
-| **WolBanking77** | Banking           | ~4h   | AI4D/HF     |
+| Dataset               | Domain              | Hours | Source      |
+| --------------------- | ------------------- | ----- | ----------- |
+| **Kallaama**    | Agriculture / Radio | ~55h  | OpenSLR 151 |
+| **ALFFA**       | Read speech         | ~18h  | OpenSLR 25  |
+| **FLEURS (wo)** | Multi-domain        | ~10h  | Google / HF |
 
-**Total: ~87+ hours** of diverse Wolof speech.
-
-## Quick Start
-
-```bash
-# Install dependencies
-pip install -e .
-
-# Download all datasets
-python -m ndapuspeech.data download_all
-
-# Build unified train/val/test dataset
-python -c "from ndapuspeech.data import build_unified_dataset; build_unified_dataset()"
-
-# Train model (see configs/training.yaml for hyperparams)
-python -m ndapuspeech.training
-```
-
-
+**Total: ~80.5+ hours** of diverse Wolof speech.
 
 ## Results (Target)
+
+> These are the project's target metrics, not yet measured final results.
 
 | Model                             | WER (dev)      | WER (test)     | Notes      |
 | --------------------------------- | -------------- | -------------- | ---------- |
@@ -51,8 +56,16 @@ python -m ndapuspeech.training
 ## Requirements
 
 - Python 3.11+
-- GPU (NVIDIA, 16GB+ VRAM recommended for training)
+- NVIDIA GPU, 16GB+ VRAM recommended for training
 - `torch`, `transformers`, `datasets`, `accelerate`, `peft`
+
+## Installation
+
+```bash
+git clone https://github.com/GAYENSIS09/ndapuspeech.git
+cd ndapuspeech
+pip install -r requirements.txt
+```
 
 ## Citation
 
@@ -60,7 +73,7 @@ python -m ndapuspeech.training
 @misc{ndapuspeech,
   title={NdapuSpeech: Open ASR for Wolof},
   author={Baye Mor Gaye},
-  year={2024},
+  year={2026},
   url={https://github.com/GAYENSIS09/ndapuspeech}
 }
 ```

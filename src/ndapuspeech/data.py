@@ -328,6 +328,7 @@ def build_from_kallaama(ds_dir: Path) -> list[dict]:
         logger.warning("[WARN] Kallaama speech dir not found at %s", speech_dir)
         return samples
     import re
+
     import soundfile as sf
 
     # STM format: recording_id channel speaker start end <tags> transcript
@@ -487,7 +488,7 @@ def build_from_hf_dataset_dir(ds_dir: Path) -> list[dict]:
     """Parse a HuggingFace dataset saved to disk (metadata only, no audio decoding)."""
     samples: list[dict] = []
     try:
-        from datasets import DatasetDict, load_from_disk, Audio
+        from datasets import Audio, DatasetDict, load_from_disk
     except ImportError:
         logger.warning("pip install datasets to build from dataset dir")
         return samples
@@ -501,14 +502,11 @@ def build_from_hf_dataset_dir(ds_dir: Path) -> list[dict]:
     # Directory to save extracted audio files
     audio_out_dir = ds_dir / "extracted_audio"
     audio_out_dir.mkdir(parents=True, exist_ok=True)
-    import soundfile as sf
 
     for split_name, split_ds in ds.items():
         # Remove audio feature decoding
-        try:
+        if "audio" in split_ds.column_names:
             split_ds = split_ds.cast_column("audio", Audio(decode=False))
-        except Exception:
-            pass
         for ex in split_ds:
             if not isinstance(ex, dict):
                 continue
