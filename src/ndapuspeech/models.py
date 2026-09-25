@@ -62,15 +62,25 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
     def _raw_features(self, features: list[dict]) -> list[dict]:
         """Load each raw audio clip and extract its Mel features."""
-        import librosa
+        import soundfile as sf
+        from librosa import resample
 
         batches: list[dict] = []
         for f in features:
             audio = f["audio"]
             if isinstance(audio, dict):
                 array = audio["array"]
+                audio_sr = audio.get("sampling_rate")
+                if audio_sr and audio_sr != config.TARGET_SAMPLE_RATE:
+                    array = resample(
+                        array,
+                        orig_sr=audio_sr,
+                        target_sr=config.TARGET_SAMPLE_RATE,
+                    )
             else:
-                array, _ = librosa.load(audio, sr=config.TARGET_SAMPLE_RATE)
+                array, sr = sf.read(audio, dtype="float32")
+                if sr != config.TARGET_SAMPLE_RATE:
+                    array = resample(array, orig_sr=sr, target_sr=config.TARGET_SAMPLE_RATE)
             batches.append({"input_features": self._mel(self.processor, array)})
         return batches
 
