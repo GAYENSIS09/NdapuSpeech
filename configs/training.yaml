@@ -19,3 +19,14 @@ push_to_hub: null
 fp16: true
 bf16: false
 hub_dataset: ndapuspeech/ndapuspeech-dataset
+# --- Optimisations  (RTX 5060 8Go / RAM 16Go) ---
+preprocessed_dir: data/processed/ndapuspeech_ds_preprocessed
+group_by_length: true
+dataloader_num_workers: 2
+dataloader_pin_memory: true
+attn_implementation: sdpa
+load_in_4bit: true
+torch_compile: false
+num_proc: 4
+extended_tokenizer: false
+eval_max_samples: 200

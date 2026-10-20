@@ -70,14 +70,24 @@ def evaluate_model(model_path: str, samples: list[dict], batch_size: int = 16) -
 def evaluate_and_compare(
     models: list[str], samples: list[dict], batch_size: int = 16
 ) -> dict[str, dict]:
-    """Evaluate several models and format a comparison summary per model."""
+    """Evaluate several models and format a comparison summary per model.
+
+    A gated/private baseline (e.g. M-Kiriku requiring HF login) is skipped
+    with a warning instead of aborting the whole comparison.
+    """
     summaries: dict[str, dict] = {}
     for model_path in models:
-        summary = evaluate_model(model_path, samples, batch_size=batch_size)
+        try:
+            summary = evaluate_model(model_path, samples, batch_size=batch_size)
+        except Exception as e:
+            logger.warning("[SKIP] baseline %s unavailable (%s)", model_path, e)
+            continue
         summaries[model_path] = {
             "overall": summary["overall"],
             "by_domain": {
                 domain: metrics["wer"] for domain, metrics in summary["by_domain"].items()
             },
         }
+    if not summaries:
+        raise RuntimeError("All models failed evaluation (check HF auth for gated repos)")
     return summaries

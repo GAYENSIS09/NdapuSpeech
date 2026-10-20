@@ -452,6 +452,62 @@ def deduplicate_by_audio(samples: list[dict]) -> list[dict]:
     return unique
 
 
+def resolve_audio_path(ref: str) -> Path | None:
+    """Resolve an audio reference to an existing file, re-anchoring stale roots.
+
+    Datasets built on another machine may store absolute paths whose root no
+    longer exists. When the path is missing, everything from the ``data``
+    segment onward is re-anchored under this checkout's ``BASE_DIR``.
+    Returns None when no candidate exists.
+    """
+    direct = Path(ref)
+    if direct.exists():
+        return direct
+    parts = direct.parts
+    for i, part in enumerate(parts):
+        if part == "data":
+            candidate = config.BASE_DIR.joinpath(*parts[i:])
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def reanchor_audio_paths(output_dir: Path | str | None = None) -> dict[str, int]:
+    """Rewrite stale audio roots in train/val/test JSONL to existing local files.
+
+    Returns a stats dict with checked/fixed/missing counts. Rows whose audio
+    cannot be found anywhere are left untouched and counted as missing.
+    """
+    out_dir = Path(output_dir) if output_dir else config.PROCESSED_DATA_DIR / "ndapuspeech_ds"
+    stats = {"checked": 0, "fixed": 0, "missing": 0}
+    for split in ("train", "val", "test"):
+        path = out_dir / f"{split}.jsonl"
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        repaired: list[str] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                sample = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            stats["checked"] += 1
+            target = resolve_audio_path(str(sample.get("audio", "")))
+            if target is None:
+                stats["missing"] += 1
+            else:
+                fixed = str(target)
+                if fixed != sample["audio"]:
+                    stats["fixed"] += 1
+                sample["audio"] = fixed
+            repaired.append(json.dumps(sample, ensure_ascii=False))
+        path.write_text("\n".join(repaired) + "\n", encoding="utf-8")
+    logger.info("Reanchored %s: %s", out_dir, stats)
+    return stats
+
+
 def split_dataset(
     samples: list[dict], train_ratio: float = config.TRAIN_SPLIT, seed: int = config.SEED
 ) -> list[dict]:

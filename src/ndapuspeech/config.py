@@ -65,6 +65,16 @@ _DATA: dict[str, dict[str, Any]] = {
         "fp16": False,
         "bf16": False,
         "hub_dataset": "ndapuspeech/ndapuspeech-dataset",
+        "preprocessed_dir": "data/processed/ndapuspeech_ds_preprocessed",
+        "group_by_length": True,
+        "dataloader_num_workers": 2,
+        "dataloader_pin_memory": True,
+        "attn_implementation": "sdpa",
+        "load_in_4bit": True,
+        "torch_compile": False,
+        "num_proc": 4,
+        "extended_tokenizer": False,
+        "eval_max_samples": 200,
     },
     "data": {
         "openslr_mirrors": [
@@ -134,6 +144,7 @@ _PATH_LEAF_KEYS = {
     ("config", "paths", "logs_dir"),
     ("training", "data_dir"),
     ("training", "output_dir"),
+    ("training", "preprocessed_dir"),
     ("training", "noise_dir"),
     ("training", "resume_from"),
     ("data", "manifests"),
@@ -257,6 +268,16 @@ TRAINING_NOISE_DIR: Path | None = TRAINING["noise_dir"]
 TRAINING_PUSH_TO_HUB: str | None = TRAINING["push_to_hub"]
 TRAINING_FP16: bool = TRAINING["fp16"]
 TRAINING_BF16: bool = TRAINING["bf16"]
+TRAINING_PREPROCESSED_DIR: Path = TRAINING["preprocessed_dir"]
+TRAINING_GROUP_BY_LENGTH: bool = TRAINING["group_by_length"]
+TRAINING_DATALOADER_NUM_WORKERS: int = TRAINING["dataloader_num_workers"]
+TRAINING_DATALOADER_PIN_MEMORY: bool = TRAINING["dataloader_pin_memory"]
+TRAINING_ATTN_IMPLEMENTATION: str | None = TRAINING["attn_implementation"]
+TRAINING_LOAD_IN_4BIT: bool = TRAINING["load_in_4bit"]
+TRAINING_TORCH_COMPILE: bool = TRAINING["torch_compile"]
+TRAINING_NUM_PROC: int = TRAINING["num_proc"]
+TRAINING_EXTENDED_TOKENIZER: bool = TRAINING["extended_tokenizer"]
+TRAINING_EVAL_MAX_SAMPLES: int = TRAINING["eval_max_samples"]
 
 # ---- HF Hub ----
 HF_DATASET_REPO: str = DATA["hf_dataset_repo"]

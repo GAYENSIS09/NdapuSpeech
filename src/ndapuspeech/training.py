@@ -12,6 +12,7 @@ from .models import (
     DataCollatorSpeechSeq2SeqWithPadding,
     NoisyDataset,
     build_model,
+    merge_lora_weights,
     set_seed,
 )
 
@@ -39,11 +40,8 @@ class TrainingConfig:
         default_factory=lambda: config.TRAINING_OUTPUT_DIR or Path("models/ndapuspeech-v1")
     )
     base_model: str = config.BASE_MODEL
-    tokenizer_dir: str | None = field(
-        default_factory=lambda: (
-            str(config.EXTENDED_TOKENIZER_DIR) if config.EXTENDED_TOKENIZER_DIR.exists() else None
-        )
-    )
+    tokenizer_dir: str | None = None
+    extended_tokenizer: bool = config.TRAINING_EXTENDED_TOKENIZER
     num_epochs: int = config.MAX_EPOCHS
     batch_size: int = config.BATCH_SIZE
     grad_accum: int = config.GRADIENT_ACCUMULATION
@@ -66,6 +64,17 @@ class TrainingConfig:
     fp16: bool = config.TRAINING_FP16
     bf16: bool = config.TRAINING_BF16
     hub_dataset: str = config.HF_DATASET_REPO
+    preprocessed_dir: Path | None = field(
+        default_factory=lambda: config.TRAINING_PREPROCESSED_DIR
+    )
+    group_by_length: bool = config.TRAINING_GROUP_BY_LENGTH
+    dataloader_num_workers: int = config.TRAINING_DATALOADER_NUM_WORKERS
+    dataloader_pin_memory: bool = config.TRAINING_DATALOADER_PIN_MEMORY
+    attn_implementation: str | None = config.TRAINING_ATTN_IMPLEMENTATION
+    load_in_4bit: bool = config.TRAINING_LOAD_IN_4BIT
+    torch_compile: bool = config.TRAINING_TORCH_COMPILE
+    num_proc: int = config.TRAINING_NUM_PROC
+    eval_max_samples: int = config.TRAINING_EVAL_MAX_SAMPLES
 
     @classmethod
     def from_yaml(cls, overrides: dict | None = None) -> "TrainingConfig":
@@ -75,15 +84,19 @@ class TrainingConfig:
             yaml_key = _YAML_REMAP.get(field_name, field_name)
             if yaml_key in config.TRAINING:
                 values[field_name] = config.TRAINING[yaml_key]
-        for key in ("data_dir", "output_dir"):
+        for key in ("data_dir", "output_dir", "preprocessed_dir"):
             if values.get(key) is not None:
                 values[key] = Path(str(values[key]))
-        for key in ("resume_from", "noise_dir"):
+        for key in ("resume_from", "noise_dir", "tokenizer_dir"):
             if values.get(key) is not None:
                 values[key] = str(values[key])
         if overrides:
             values.update(overrides)
         cfg = cls(**values)
+        if cfg.extended_tokenizer and not cfg.tokenizer_dir:
+            cfg.tokenizer_dir = (
+                str(config.EXTENDED_TOKENIZER_DIR) if config.EXTENDED_TOKENIZER_DIR.exists() else None
+            )
         if cfg.save_steps % cfg.eval_steps != 0:
             raise ValueError(
                 f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps "
@@ -184,8 +197,15 @@ def compute_metrics_fn(processor: Any) -> Callable[[Any], dict]:
 
 
 def _load_datasets(cfg: TrainingConfig) -> Any:
-    """Load train/val/test splits from local JSONL or a hub dataset."""
+    """Load train/val/test splits from preprocessed Arrow, JSONL, or hub."""
     _, load_dataset, _, _, _, _ = _load_training_libs()
+
+    if cfg.preprocessed_dir is not None and cfg.preprocessed_dir.exists():
+        from .prepare import is_preprocessed, load_preprocessed_dataset
+
+        if is_preprocessed(cfg.preprocessed_dir):
+            logger.info("Using preprocessed Arrow at %s (mmap, 0x I/O)", cfg.preprocessed_dir)
+            return load_preprocessed_dataset(cfg.preprocessed_dir)
 
     if cfg.data_dir.exists():
         data_files = {split: str(cfg.data_dir / f"{split}.jsonl") for split in _JSON_SPLITS}
@@ -197,6 +217,44 @@ def _load_datasets(cfg: TrainingConfig) -> Any:
         except (ConnectionError, OSError, ValueError) as e:
             raise FileNotFoundError("No local or hub dataset found") from e
     return ds
+
+
+def _select_split_columns(split: Any) -> Any:
+    """Keep precomputed columns when present, else raw audio + transcript."""
+    names: list[str] = list(split.column_names)
+    if "input_features" in names and "labels" in names:
+        keep = ["input_features", "labels"]
+        for extra in ("length", "duration"):
+            if extra in names:
+                keep.append(extra)
+        return split.select_columns(keep)
+    return split.select_columns(["audio", "transcript"])
+
+
+def _length_grouping_kwargs(
+    training_args_cls: Any, train_ds: Any, group_by_length: bool
+) -> dict[str, Any]:
+    """Map the note.txt length-grouping knob onto the installed transformers API.
+
+    transformers 4.x takes ``group_by_length``; 5.x takes
+    ``train_sampling_strategy="group_by_length"`` plus ``length_column_name``.
+    """
+    import inspect
+
+    params = inspect.signature(training_args_cls.__init__).parameters
+    if "group_by_length" in params:
+        return {"group_by_length": group_by_length}
+    if not group_by_length:
+        return {"train_sampling_strategy": "random"}
+    names = list(train_ds.column_names) if hasattr(train_ds, "column_names") else []
+    if "length" in names:
+        length_col = "length"
+    elif "duration" in names:
+        length_col = "duration"
+    else:
+        logger.warning("No length/duration column; length grouping falls back to random")
+        return {"train_sampling_strategy": "random"}
+    return {"train_sampling_strategy": "group_by_length", "length_column_name": length_col}
 
 
 def train_model(cfg: TrainingConfig) -> Path:
@@ -225,12 +283,20 @@ def train_model(cfg: TrainingConfig) -> Path:
         lr_decoder=cfg.lr_decoder,
         lr_encoder=cfg.lr_encoder,
         tokenizer_path=cfg.tokenizer_dir,
+        attn_implementation=cfg.attn_implementation,
+        load_in_4bit=cfg.load_in_4bit,
+        torch_compile=cfg.torch_compile,
     )
     processor.tokenizer.model_max_length = model.config.max_target_positions
 
     ds = _load_datasets(cfg)
-    train_ds = ds["train"].select_columns(["audio", "transcript"])
-    val_ds = (ds["val"] if "val" in ds else ds["test"]).select_columns(["audio", "transcript"])
+    train_ds = _select_split_columns(ds["train"])
+    val_ds = _select_split_columns(ds["val"] if "val" in ds else ds["test"])
+    if cfg.eval_max_samples and len(val_ds) > cfg.eval_max_samples:
+        step = len(val_ds) / cfg.eval_max_samples
+        idx = [int(i * step) for i in range(cfg.eval_max_samples)]
+        val_ds = val_ds.select(idx)
+        logger.info("Eval capped to %d evenly-spaced samples for speed", cfg.eval_max_samples)
     test_ds = ds.get("test", None)
 
     del ds
@@ -247,6 +313,16 @@ def train_model(cfg: TrainingConfig) -> Path:
             f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps "
             f"({cfg.eval_steps}) when load_best_model_at_end=True"
         )
+
+    import os
+
+    num_workers = cfg.dataloader_num_workers
+    if os.name == "nt" and num_workers > 0:
+        logger.warning(
+            "[WIN] dataloader_num_workers=%d forced to 0 (Windows spawn unsafe)",
+            num_workers,
+        )
+        num_workers = 0
 
     optim_args = {
         "num_train_epochs": cfg.num_epochs,
@@ -268,7 +344,9 @@ def train_model(cfg: TrainingConfig) -> Path:
         "output_dir": str(out_dir),
         "report_to": "none",
         "seed": cfg.seed,
-        "dataloader_num_workers": 0,
+        "dataloader_num_workers": num_workers,
+        "dataloader_pin_memory": cfg.dataloader_pin_memory and device == "cuda",
+        **_length_grouping_kwargs(training_args_cls, train_ds, cfg.group_by_length),
         "remove_unused_columns": False,
         "gradient_checkpointing": True,
         "optim": "adamw_torch",
@@ -294,16 +372,45 @@ def train_model(cfg: TrainingConfig) -> Path:
     logger.info("Train samples: %d, Val samples: %d", len(train_ds), len(val_ds))
     trainer.train()
 
+    if cfg.use_lora:
+        model = merge_lora_weights(model)
+        trainer.model = model
+
     logger.info("Saving final model...")
     trainer.save_model(str(out_dir))
     processor.save_pretrained(str(out_dir))
 
     if test_ds is not None:
-        logger.info("Test: %s", trainer.evaluate(test_ds, metric_key_prefix="test"))
+        try:
+            subset = test_ds
+            try:
+                if len(test_ds) > 100:
+                    subset = test_ds.select(range(100))
+            except (AttributeError, IndexError, ValueError):
+                pass
+            logger.info("Test: %s", trainer.evaluate(subset, metric_key_prefix="test"))
+        except (RuntimeError, MemoryError) as e:
+            logger.warning("[SKIP] final test eval failed (%s); model still saved", e)
 
     if cfg.push_to_hub:
         model.push_to_hub(cfg.push_to_hub)
         processor.push_to_hub(cfg.push_to_hub)
 
     logger.info("Model saved to %s", out_dir)
+    try:
+        import json
+
+        (out_dir / "training_complete.json").write_text(
+            json.dumps(
+                {
+                    "global_step": int(getattr(trainer.state, "global_step", 0)),
+                    "base_model": cfg.base_model,
+                    "max_epochs": cfg.num_epochs,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except (OSError, TypeError, ValueError) as e:
+        logger.warning("Could not write training_complete.json (%s)", e)
     return out_dir

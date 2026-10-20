@@ -39,17 +39,77 @@ def set_seed(seed: int = config.SEED) -> None:
         pass
 
 
+WHISPER_EXPECTED_MEL_FRAMES: int = 3000
+
+_NO_TIMESTAMPS_TOKEN = "<|notimestamps|>"
+_EOT_TOKEN = "<|endoftext|>"
+
+
+def build_decoder_labels(tokenizer: Any, text: str) -> list[int]:
+    """Token ids for free-transcription Whisper labels.
+
+    Matches Whisper's free-transcription decoder prompt
+    ``[<|startoftranscript|>, <|notimestamps|>]``: labels start right after the
+    decoder start token with ``<|notimestamps|>`` and end with ``<|endoftext|>``.
+    No language or task token is prepended, so the fine-tuned model never
+    depends on a language the base vocabulary does not contain.
+    """
+    ids = tokenizer(text, add_special_tokens=False).input_ids
+    no_ts = tokenizer.convert_tokens_to_ids(_NO_TIMESTAMPS_TOKEN)
+    eot = tokenizer.convert_tokens_to_ids(_EOT_TOKEN)
+    return [no_ts, *ids, eot]
+
+
+def configure_free_transcription(model: Any) -> None:
+    """Disable Whisper's language detection / forced prefix for fine-tuning.
+
+    The model is fine-tuned without a language token (Wolof has none in the base
+    vocabulary). Generation must therefore start from the bare prompt
+    ``[<|startoftranscript|>, <|notimestamps|>]`` instead of running language
+    detection and injecting a wrong language token. This mirrors the labels
+    produced by :func:`build_decoder_labels`.
+    """
+    model.config.forced_decoder_ids = None
+    model.config.suppress_tokens = []
+    model.config.use_cache = False
+    model.config.language = None
+    model.config.task = None
+    gen_cfg = getattr(model, "generation_config", None)
+    if gen_cfg is not None:
+        for attr in ("forced_decoder_ids", "lang_to_id", "task_to_id"):
+            gen_cfg.__dict__.pop(attr, None)
+        gen_cfg.language = None
+        gen_cfg.task = None
+        gen_cfg.suppress_tokens = None
+        gen_cfg.begin_suppress_tokens = None
+
+
 class DataCollatorSpeechSeq2SeqWithPadding:
     """Build a Whisper batch without materializing features in RAM.
 
     Accepts raw rows (``audio`` path + ``transcript``) and extracts Mel features
     lazily per batch, or precomputed rows (``input_features`` + tokenized labels),
     e.g. produced by NoisyDataset.
+
+    Whisper's encoder requires exactly 3000 mel frames (30s). Precomputed
+    features are stored trimmed to save mmap space, so every batch is
+    re-padded/truncated to ``target_frames`` here.
     """
 
-    def __init__(self, processor: Any, padding: str = "longest"):
+    def __init__(
+        self,
+        processor: Any,
+        padding: str = "longest",
+        target_frames: int | None = None,
+    ):
         self.processor = processor
         self.padding = padding
+        if target_frames is None:
+            target_frames = int(
+                getattr(processor.feature_extractor, "nb_max_frames", 0)
+                or WHISPER_EXPECTED_MEL_FRAMES
+            )
+        self.target_frames: int = target_frames
 
     @staticmethod
     def _mel(processor: Any, audio: np.ndarray) -> np.ndarray:
@@ -84,16 +144,43 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             batches.append({"input_features": self._mel(self.processor, array)})
         return batches
 
+    def _pad_mels(self, mels: list[np.ndarray]) -> list[dict]:
+        """Pad/trim (n_mels, time) arrays to exactly ``self.target_frames``.
+
+        Whisper's encoder requires 3000 frames; ``feature_extractor.pad``
+        with ``padding="longest"`` keeps shorter batches short, hence the
+        explicit rectangularization here.
+        """
+        padded: list[dict] = []
+        for m in mels:
+            if hasattr(m, "detach"):
+                m = m.detach().cpu().numpy()  # type: ignore[union-attr]
+            arr = np.asarray(m, dtype=np.float32)
+            if arr.ndim != 2:
+                raise ValueError(f"Expected 2D mel (n_mels, time), got shape {arr.shape}")
+            n_frames = arr.shape[1]
+            if n_frames > self.target_frames:
+                arr = arr[:, : self.target_frames]
+            elif n_frames < self.target_frames:
+                arr = np.pad(arr, ((0, 0), (0, self.target_frames - n_frames)))
+            padded.append({"input_features": arr})
+        return padded
+
     def __call__(self, features: list[dict]) -> dict:
         precomputed = "input_features" in features[0]
         if precomputed:
-            raw_batch = [{"input_features": f["input_features"]} for f in features]
+            raw_batch = self._pad_mels(
+                [np.asarray(f["input_features"], dtype=np.float32) for f in features]
+            )
             label_ids = [f["labels"] for f in features]
         else:
-            raw_batch = self._raw_features(features)
+            raw_mels = [
+                np.asarray(d["input_features"], dtype=np.float32)
+                for d in self._raw_features(features)
+            ]
+            raw_batch = self._pad_mels(raw_mels)
             label_ids = [
-                self.processor.tokenizer(f["transcript"], add_special_tokens=False).input_ids
-                for f in features
+                build_decoder_labels(self.processor.tokenizer, f["transcript"]) for f in features
             ]
 
         batch = self.processor.feature_extractor.pad(
@@ -101,17 +188,16 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=self.padding,
             return_tensors="pt",
         )
-        labels = self.processor.tokenizer.pad(
-            {"input_ids": label_ids},
-            padding=self.padding,
-            return_tensors="pt",
-        )["input_ids"]
+        import torch
+
+        if batch["input_features"].dtype == torch.float64:
+            batch["input_features"] = batch["input_features"].to(torch.float32)
         max_len = self.processor.tokenizer.model_max_length
-        if labels.shape[1] > max_len:
-            labels = labels[:, :max_len]
-        labels = labels.masked_fill(labels == self.processor.tokenizer.pad_token_id, -100)
-        if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all():
-            labels = labels[:, 1:]
+        padded = [list(ids)[:max_len] for ids in label_ids]
+        width = max(len(ids) for ids in padded)
+        labels = torch.tensor(
+            [ids + [-100] * (width - len(ids)) for ids in padded], dtype=torch.long
+        )
         batch["labels"] = labels
         return batch
 
@@ -161,17 +247,26 @@ class NoisyDataset:
 
     def __getitem__(self, idx: int) -> dict:
         ex = self.dataset[idx]
-        audio = ex["audio"]["array"] if isinstance(ex["audio"], dict) else ex["audio"]
+        raw_audio = ex["audio"]["array"] if isinstance(ex["audio"], dict) else ex["audio"]
+        if isinstance(raw_audio, str):
+            import soundfile as sf
+            from librosa import resample
+
+            array, sr = sf.read(raw_audio, dtype="float32")
+            if sr != config.TARGET_SAMPLE_RATE:
+                array = resample(
+                    array, orig_sr=sr, target_sr=config.TARGET_SAMPLE_RATE
+                ).astype(np.float32)
+            else:
+                array = np.asarray(array, dtype=np.float32)
+        else:
+            array = np.asarray(raw_audio, dtype=np.float32)
         if random.random() < self.aug_prob:
-            audio = self._augment(audio)
+            array = self._augment(array)
         input_features = self.processor.feature_extractor(
-            audio, sampling_rate=config.TARGET_SAMPLE_RATE, return_tensors="pt"
+            array, sampling_rate=config.TARGET_SAMPLE_RATE, return_tensors="pt"
         ).input_features[0]
-        labels = self.processor.tokenizer(
-            ex["transcript"],
-            return_tensors="pt",
-            add_special_tokens=False,
-        ).input_ids[0]
+        labels = build_decoder_labels(self.processor.tokenizer, ex["transcript"])
         return {"input_features": input_features, "labels": labels}
 
 
@@ -274,20 +369,48 @@ def build_model(
     lr_decoder: float = LEARNING_RATE_DECODER,
     lr_encoder: float = LEARNING_RATE_ENCODER,
     tokenizer_path: str | None = None,
+    attn_implementation: str | None = None,
+    load_in_4bit: bool = False,
+    torch_compile: bool = False,
 ) -> tuple[Any, list[dict]]:
     """Load a Whisper model, optionally wrap it in LoRA, and build discrimative LR groups.
 
     When *tokenizer_path* points to an extended Whisper tokenizer (produced by
     ``extend_whisper_tokenizer``), the model embedding layer is resized so that
     all newly added tokens have an embedding.
+
+    *attn_implementation* forces the CUDA kernel (``"sdpa"`` on RTX 5060).
+    *load_in_4bit* enables QLoRA via bitsandbytes to fit 8 Go VRAM.
+    *torch_compile* fuses kernels with ``torch.compile`` (2-3 min warmup).
     """
     from transformers import WhisperForConditionalGeneration
 
+    load_kwargs: dict[str, Any] = {}
+    if attn_implementation:
+        load_kwargs["attn_implementation"] = attn_implementation
+    if load_in_4bit:
+        try:
+            import torch
+            from transformers import BitsAndBytesConfig
+
+            compute_dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            )
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=compute_dtype,
+            )
+            load_kwargs["device_map"] = "auto"
+        except (ImportError, RuntimeError) as e:
+            logger.warning("4-bit quantization unavailable (%s); using fp16 weights", e)
+
     if resume_from:
         logger.info("Resuming from %s", resume_from)
-        model = WhisperForConditionalGeneration.from_pretrained(resume_from)
+        model = WhisperForConditionalGeneration.from_pretrained(resume_from, **load_kwargs)
     else:
-        model = WhisperForConditionalGeneration.from_pretrained(base_model)
+        model = WhisperForConditionalGeneration.from_pretrained(base_model, **load_kwargs)
 
     if tokenizer_path:
         from transformers import AutoTokenizer
@@ -309,14 +432,26 @@ def build_model(
             lora_dropout=0.05,
             bias="none",
         )
+        if load_in_4bit and "quantization_config" in load_kwargs:
+            try:
+                from peft import prepare_model_for_kbit_training
+
+                model = prepare_model_for_kbit_training(model)
+            except (ImportError, ValueError) as e:
+                logger.warning("k-bit training prep skipped (%s)", e)
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
-    model.config.use_cache = False
-    model.config.language = config.LANGUAGE
-    model.config.task = "transcribe"
+    if torch_compile:
+        try:
+            import torch
+
+            model = torch.compile(model)
+            logger.info("torch.compile enabled (fused kernels)")
+        except RuntimeError as e:
+            logger.warning("torch.compile failed (%s); continuing uncompiled", e)
+
+    configure_free_transcription(model)
 
     encoder_params = [p for n, p in model.named_parameters() if "encoder" in n]
     decoder_params = [p for n, p in model.named_parameters() if "encoder" not in n]
@@ -325,3 +460,59 @@ def build_model(
         {"params": [p for p in encoder_params if p.requires_grad], "lr": lr_encoder},
     ]
     return model, param_groups
+
+
+def merge_lora_weights(model: Any) -> Any:
+    """Merge LoRA adapters into the base model, returning a standalone model.
+
+    Returns *model* unchanged when it carries no LoRA layers or the merge fails
+    (e.g. quantized weights that peft cannot merge on this host).
+    """
+    merge = getattr(model, "merge_and_unload", None)
+    if not callable(merge):
+        return model
+    try:
+        return merge()
+    except (ValueError, RuntimeError) as e:
+        logger.warning("LoRA merge failed (%s); saving adapter only", e)
+        return model
+
+
+def merge_saved_lora_adapter(model_dir: Path | str, base_model: str | None = None) -> Path:
+    """Merge a saved LoRA adapter into its base model as a standalone model.
+
+    Loads the base model on CPU, pre-resizes its embeddings to the saved
+    extended tokenizer (adapters trained here include resized embeddings),
+    merges, then writes ``model.safetensors`` next to the tokenizer. Adapter
+    files are moved to ``lora_adapter/`` so transformers loads the directory
+    directly, without PEFT.
+    """
+    import json
+
+    import torch
+    from peft import PeftModel
+    from transformers import AutoTokenizer, WhisperForConditionalGeneration
+
+    out_dir = Path(model_dir)
+    adapter_file: Path | None = None
+    for candidate in ("adapter_model.safetensors", "adapter_model.bin"):
+        if (out_dir / candidate).exists():
+            adapter_file = out_dir / candidate
+            break
+    if adapter_file is None:
+        raise FileNotFoundError(f"No LoRA adapter weights in {out_dir}")
+    tokenizer = AutoTokenizer.from_pretrained(str(out_dir))
+    adapter_cfg = json.loads((out_dir / "adapter_config.json").read_text(encoding="utf-8"))
+    base_id = base_model or str(adapter_cfg["base_model_name_or_path"])
+    base = WhisperForConditionalGeneration.from_pretrained(base_id, torch_dtype=torch.float32)
+    if len(tokenizer) != base.config.vocab_size:
+        base.resize_token_embeddings(len(tokenizer))
+        logger.info("Resized base embeddings to %d tokens before merge", len(tokenizer))
+    merged = PeftModel.from_pretrained(base, str(out_dir)).merge_and_unload()
+    backup = out_dir / "lora_adapter"
+    backup.mkdir(exist_ok=True)
+    (out_dir / "adapter_config.json").replace(backup / "adapter_config.json")
+    adapter_file.replace(backup / adapter_file.name)
+    merged.save_pretrained(str(out_dir))
+    logger.info("Merged LoRA saved as standalone model in %s", out_dir)
+    return out_dir
